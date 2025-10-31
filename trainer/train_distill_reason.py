@@ -108,7 +108,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=1024, type=int, help="训练的最大截断长度")
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
-    parser.add_argument("--data_path", type=str, default="../dataset/r1_mix_1024.jsonl", help="推理蒸馏数据路径")
+    parser.add_argument("--data_path", type=str, default="../../dataset/r1_mix_1024.jsonl", help="推理蒸馏数据路径")
     parser.add_argument('--from_weight', default='dpo', type=str, help="基于哪个权重训练，默认dpo")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
@@ -133,7 +133,7 @@ if __name__ == "__main__":
     # ========== 4. 配wandb ==========
     wandb = None
     if args.use_wandb and is_main_process():
-        import swanlab as wandb
+        import wandb
         wandb_id = ckp_data.get('wandb_id') if ckp_data else None
         resume = 'must' if wandb_id else None
         wandb_run_name = f"MiniMind-Reasoning-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LR-{args.learning_rate}"
