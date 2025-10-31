@@ -20,7 +20,39 @@ from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint
 warnings.filterwarnings('ignore')
 
 
-def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+def evaluate(model, valid_loader, device, dtype):
+    """评估模型在验证集上的性能"""
+    model.eval()
+    loss_fct = nn.CrossEntropyLoss(reduction='none')
+    total_loss = 0.0
+    total_tokens = 0.0
+
+    device_str = str(device)
+    autocast_ctx = nullcontext() if "cpu" in device_str else torch.cuda.amp.autocast(dtype=dtype)
+
+    with torch.no_grad():
+        for X, Y, loss_mask in valid_loader:
+            X = X.to(device)
+            Y = Y.to(device)
+            loss_mask = loss_mask.to(device)
+
+            with autocast_ctx:
+                res = model(X)
+                loss = loss_fct(
+                    res.logits.view(-1, res.logits.size(-1)),
+                    Y.view(-1)
+                ).view(Y.size())
+                loss = (loss * loss_mask).sum()
+                total_loss += loss.item()
+                total_tokens += loss_mask.sum().item()
+
+    model.train()
+    avg_loss = total_loss / (total_tokens + 1e-8)
+    ppl = torch.exp(torch.tensor(avg_loss)).item()
+    return avg_loss, ppl
+
+
+def train_epoch(epoch, loader, iters, start_step=0, wandb=None, valid_loader=None, valid_interval=None):
     loss_fct = nn.CrossEntropyLoss(reduction='none')
     start_time = time.time()
     for step, (X, Y, loss_mask) in enumerate(loader, start=start_step + 1):
@@ -58,10 +90,18 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             current_loss = loss.item() * args.accumulation_steps
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / (step + 1) * iters // 60 - spend_time // 60
-            
+
             Logger(f'Epoch:[{epoch+1}/{args.epochs}]({step}/{iters}) loss:{current_loss:.6f} lr:{current_lr:.12f} epoch_Time:{eta_min}min:')
-            
-            if wandb: wandb.log({"loss": current_loss, "lr": current_lr, "epoch_Time": eta_min})
+
+            log_dict = {"loss": current_loss, "lr": current_lr, "epoch_Time": eta_min}
+
+            # 验证集评估
+            if valid_loader and valid_interval and step % valid_interval == 0:
+                valid_loss, valid_ppl = evaluate(model, valid_loader, args.device, dtype)
+                Logger(f'Validation - loss:{valid_loss:.6f} ppl:{valid_ppl:.4f}')
+                log_dict.update({"valid_loss": valid_loss, "valid_ppl": valid_ppl})
+
+            if wandb: wandb.log(log_dict)
 
         if (step % args.save_interval == 0 or step == iters - 1) and is_main_process():
             model.eval()
@@ -100,6 +140,8 @@ if __name__ == "__main__":
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
     parser.add_argument("--wandb_project", type=str, default="MiniMind-Pretrain", help="wandb项目名")
+    parser.add_argument("--valid_ratio", type=float, default=0.1, help="验证集比例")
+    parser.add_argument("--valid_interval", type=int, default=100, help="验证间隔")
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
@@ -128,7 +170,14 @@ if __name__ == "__main__":
     
     # ========== 5. 定义模型、数据、优化器 ==========
     model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
-    train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
+    full_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
+
+    # 切分训练集和验证集
+    total_size = len(full_ds)
+    valid_size = int(total_size * args.valid_ratio)
+    train_size = total_size - valid_size
+    train_ds, valid_ds = torch.utils.data.random_split(full_ds, [train_size, valid_size])
+
     train_sampler = DistributedSampler(train_ds) if dist.is_initialized() else None
     scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
@@ -146,7 +195,16 @@ if __name__ == "__main__":
     if dist.is_initialized():
         model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[local_rank])
-    
+
+    # ========== 7.5 创建验证集加载器 ==========
+    valid_loader = DataLoader(
+        valid_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True
+    ) if is_main_process() else None  # 仅主进程运行验证
+
     # ========== 8. 开始训练 ==========
     for epoch in range(start_epoch, args.epochs):
         train_sampler and train_sampler.set_epoch(epoch)
@@ -154,7 +212,7 @@ if __name__ == "__main__":
             batch_sampler = SkipBatchSampler(train_sampler or range(len(train_ds)), args.batch_size, start_step + 1)
             loader = DataLoader(train_ds, batch_sampler=batch_sampler, num_workers=args.num_workers, pin_memory=True)
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + start_step + 1, start_step, wandb)
+            train_epoch(epoch, loader, len(loader) + start_step + 1, start_step, wandb, valid_loader, args.valid_interval)
         else: # 默认从头开始
             loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=(train_sampler is None), sampler=train_sampler, num_workers=args.num_workers, pin_memory=True)
-            train_epoch(epoch, loader, len(loader), 0, wandb)
+            train_epoch(epoch, loader, len(loader), 0, wandb, valid_loader, args.valid_interval)
