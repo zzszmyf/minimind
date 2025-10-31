@@ -253,7 +253,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument('--max_seq_len', default=66, type=int, help="Prompt最大长度")
     parser.add_argument("--max_gen_len", type=int, default=1536, help="生成的最大长度")
-    parser.add_argument("--data_path", type=str, default="../dataset/rlaif-mini.jsonl", help="RLAIF数据路径")
+    parser.add_argument("--data_path", type=str, default="../../dataset/rlaif-mini.jsonl", help="RLAIF数据路径")
     parser.add_argument("--clip_epsilon", type=float, default=0.1, help="PPO裁剪参数")
     parser.add_argument("--vf_coef", type=float, default=0.5, help="Value function系数")
     parser.add_argument("--kl_coef", type=float, default=0.02, help="KL散度惩罚系数")
@@ -283,7 +283,7 @@ if __name__ == "__main__":
     # ========== 4. 配wandb ==========
     wandb = None
     if args.use_wandb and is_main_process():
-        import swanlab as wandb
+        import wandb
         wandb_id = ckp_data.get('wandb_id') if ckp_data else None
         resume = 'must' if wandb_id else None
         wandb_run_name = f"MiniMind-PPO-Epoch-{args.epochs}-BS-{args.batch_size}-LR-{args.learning_rate}"
